@@ -1,26 +1,11 @@
 /*
  *  ECP5 PicoRV32 demo
- *
  *  Copyright (C) 2017  Clifford Wolf <clifford@clifford.at>
  *  Copyright (C) 2018  David Shah <dave@ds0.me>
  *
- *  Permission to use, copy, modify, and/or distribute this software for any
- *  purpose with or without fee is hereby granted, provided that the above
- *  copyright notice and this permission notice appear in all copies.
- *
- *  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- *  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- *  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- *  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- *  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- *  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- *  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
- *
+ *  [버튼 페리페럴 추가 - 2026.05]
+ *  0x02000010 : 버튼 입력 레지스터 (읽기 전용, btn[6:0])
  */
-
-//`ifdef PICORV32_V
-//`error "attosoc.v must be read before picorv32.v!"
-//`endif
 
 `define PICORV32_REGS picosoc_regs
 
@@ -28,6 +13,7 @@ module attosoc (
 	input clk,
 	input reset_n,
 	output reg [7:0] led,
+	input [6:0] btn,        // ★ 추가: 버튼 입력 포트
 	output uart_tx,
 	input uart_rx
 );
@@ -44,8 +30,8 @@ module attosoc (
 	end
 
 	parameter integer MEM_WORDS = 8192;
-	parameter [31:0] STACKADDR = 32'h 0000_0000 + (4*MEM_WORDS);       // end of memory
-	parameter [31:0] PROGADDR_RESET = 32'h 0000_0000;       // start of memory
+	parameter [31:0] STACKADDR = 32'h 0000_0000 + (4*MEM_WORDS);
+	parameter [31:0] PROGADDR_RESET = 32'h 0000_0000;
 
 	reg [31:0] ram [0:MEM_WORDS-1];
 	initial $readmemh("firmware.hex", ram);
@@ -60,19 +46,18 @@ module attosoc (
 	wire [3:0] mem_wstrb;
 	wire [31:0] mem_rdata;
 
-	always @(posedge clk)
-        begin
+	always @(posedge clk) begin
 		ram_ready <= 1'b0;
 		if (mem_addr[31:24] == 8'h00 && mem_valid) begin
-			if (mem_wstrb[0]) ram[mem_addr[23:2]][7:0] <= mem_wdata[7:0];
-			if (mem_wstrb[1]) ram[mem_addr[23:2]][15:8] <= mem_wdata[15:8];
+			if (mem_wstrb[0]) ram[mem_addr[23:2]][7:0]   <= mem_wdata[7:0];
+			if (mem_wstrb[1]) ram[mem_addr[23:2]][15:8]  <= mem_wdata[15:8];
 			if (mem_wstrb[2]) ram[mem_addr[23:2]][23:16] <= mem_wdata[23:16];
 			if (mem_wstrb[3]) ram[mem_addr[23:2]][31:24] <= mem_wdata[31:24];
 
 			ram_rdata <= ram[mem_addr[23:2]];
 			ram_ready <= 1'b1;
 		end
-        end
+	end
 
 	wire iomem_valid;
 	reg iomem_ready;
@@ -83,7 +68,7 @@ module attosoc (
 
 	assign iomem_valid = mem_valid && (mem_addr[31:24] > 8'h 01);
 	assign iomem_wstrb = mem_wstrb;
-	assign iomem_addr = mem_addr;
+	assign iomem_addr  = mem_addr;
 	assign iomem_wdata = mem_wdata;
 
 	wire        simpleuart_reg_div_sel = mem_valid && (mem_addr == 32'h 0200_0004);
@@ -93,22 +78,29 @@ module attosoc (
 	wire [31:0] simpleuart_reg_dat_do;
 	wire simpleuart_reg_dat_wait;
 
+	// ★ 추가: 버튼 레지스터 (0x02000010, 읽기 전용)
+	wire        btn_reg_sel = mem_valid && (mem_addr == 32'h 0200_0010);
+	wire [31:0] btn_reg_do  = {25'b0, btn};   // btn[6:0]을 하위 7비트에
+
 	always @(posedge clk) begin
 		iomem_ready <= 1'b0;
-	  if (iomem_valid && iomem_wstrb[0] && mem_addr == 32'h 02000000) begin
-	    led <= iomem_wdata[7:0];
+		if (iomem_valid && iomem_wstrb[0] && mem_addr == 32'h 02000000) begin
+			led <= iomem_wdata[7:0];
 			iomem_ready <= 1'b1;
 		end
 	end
 
-
 	assign mem_ready = (iomem_valid && iomem_ready) ||
-	                   simpleuart_reg_div_sel || (simpleuart_reg_dat_sel && !simpleuart_reg_dat_wait) ||
-										 ram_ready;
+	                   simpleuart_reg_div_sel ||
+	                   (simpleuart_reg_dat_sel && !simpleuart_reg_dat_wait) ||
+	                   btn_reg_sel ||        // ★ 추가
+	                   ram_ready;
 
 	assign mem_rdata = simpleuart_reg_div_sel ? simpleuart_reg_div_do :
-										 simpleuart_reg_dat_sel ? simpleuart_reg_dat_do :
- 											ram_rdata;
+	                   simpleuart_reg_dat_sel ? simpleuart_reg_dat_do :
+	                   btn_reg_sel           ? btn_reg_do :    // ★ 추가
+	                   ram_rdata;
+
 	picorv32 #(
 		.STACKADDR(STACKADDR),
 		.PROGADDR_RESET(PROGADDR_RESET),
@@ -148,12 +140,9 @@ module attosoc (
 		.reg_dat_di  (mem_wdata),
 		.reg_dat_do  (simpleuart_reg_dat_do),
 		.reg_dat_wait(simpleuart_reg_dat_wait)
-);
+	);
 
 endmodule
-
-// Implementation note:
-// Replace the following two modules with wrappers for your SRAM cells.
 
 module picosoc_regs (
 	input clk, wen,

@@ -1,32 +1,70 @@
-# ******* project, board and chip name *******
-PROJECT = picorv32
-BOARD = ulx3s
-# 12 25 45 85 (but this project routes only on 45 and 85)
+# ============================================================
+# prjtrellis-picorv32 Windows Build Makefile
+# ULX3S 12K + OSS CAD Suite + xPack RISC-V GCC
+# ============================================================
+
+PROJECT  = picorv32
+BOARD    = ulx3s
 FPGA_SIZE = 12
+CHIP_ID  = 0x21111043
 
-# ******* design files *******
-CONSTRAINTS = ulx3s_v20_segpdi.lpf
-TOP_MODULE = top
-TOP_MODULE_FILE = $(TOP_MODULE).v
-VERILOG_FILES = $(TOP_MODULE_FILE) attosoc.v picorv32.v simpleuart.v
-VHDL_TO_VERILOG_FILES =
+CONSTRAINTS  = ulx3s_v20_segpdi.lpf
+TOP_MODULE   = top
+VERILOG_FILES = top.v attosoc.v picorv32.v simpleuart.v
 
-# synthesis options
-# YOSYS_OPTIONS = -noccu2
+OUTPUT = $(BOARD)_$(FPGA_SIZE)f_$(PROJECT)
 
-F32C-COMPILER-PATH=~davor/.arduino15/packages/FPGArduino/tools/f32c-compiler/1.0.0/bin
-RISCV32-GCC=$(F32C-COMPILER-PATH)/riscv32-elf-gcc
-RISCV32-OBJCOPY=$(F32C-COMPILER-PATH)/riscv32-elf-objcopy
+# ---- RISC-V GCC (xPack) ------------------------------------
+RISCV_PATH   = C:/Users/khsab/Downloads/xpack-riscv-none-elf-gcc-15.2.0-1-win32-x64/xpack-riscv-none-elf-gcc-15.2.0-1/bin
+RISCV_GCC    = $(RISCV_PATH)/riscv-none-elf-gcc
+RISCV_OBJCOPY= $(RISCV_PATH)/riscv-none-elf-objcopy
 
-firmware.hex:
+# ---- OSS CAD Suite -----------------------------------------
+OSS_CAD   = C:/Users/khsab/Downloads/oss-cad-suite
+TRELLISDB = $(OSS_CAD)/share/trellis/database
+BASECFG   = $(OSS_CAD)/share/trellis/misc/basecfgs/empty_lfe5u-25f.config
 
+# ============================================================
+.PHONY: all clean
+
+all: $(OUTPUT).bit
+
+# ---- 1단계: 펌웨어 빌드 (C → hex) --------------------------
 firmware.elf: sections.lds start.s firmware.c
-	$(RISCV32-GCC) -march=rv32i -mabi=ilp32 -Wl,-Bstatic,-T,sections.lds,--strip-debug -ffreestanding -nostdlib -o firmware.elf start.s firmware.c
+	$(RISCV_GCC) -march=rv32i -mabi=ilp32 \
+	  -Wl,-Bstatic,-T,sections.lds,--strip-debug \
+	  -ffreestanding -nostdlib \
+	  -o firmware.elf start.s firmware.c
 
 firmware.bin: firmware.elf
-	$(RISCV32-OBJCOPY) -O binary firmware.elf /dev/stdout > firmware.bin
+	$(RISCV_OBJCOPY) -O binary firmware.elf firmware.bin
 
 firmware.hex: firmware.bin
-	python3 makehex.py $^ 4096 > $@
+	python3 makehex.py firmware.bin 4096 > firmware.hex
 
-include scripts/ulx3s_trellis.mk
+# ---- 2단계: 합성 (Verilog → JSON) --------------------------
+$(PROJECT).json: firmware.hex $(VERILOG_FILES)
+	yosys \
+	  -p "hierarchy -top $(TOP_MODULE)" \
+	  -p "synth_ecp5 -json $(PROJECT).json" \
+	  $(VERILOG_FILES)
+
+# ---- 3단계: 배치·배선 (JSON → config) ----------------------
+$(OUTPUT).config: $(PROJECT).json
+	nextpnr-ecp5 --25k \
+	  --json $(PROJECT).json \
+	  --lpf $(CONSTRAINTS) \
+	  --basecfg $(BASECFG) \
+	  --textcfg $(OUTPUT).config
+
+# ---- 4단계: 비트스트림 생성 (config → .bit) ----------------
+$(OUTPUT).bit: $(OUTPUT).config
+	ecppack --idcode $(CHIP_ID) \
+	  --db $(TRELLISDB) \
+	  --input $(OUTPUT).config \
+	  --bit $(OUTPUT).bit
+
+# ---- 청소 --------------------------------------------------
+clean:
+	del /Q firmware.elf firmware.bin firmware.hex 2>nul
+	del /Q $(PROJECT).json $(OUTPUT).config $(OUTPUT).bit 2>nul
