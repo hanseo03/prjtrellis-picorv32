@@ -5,6 +5,14 @@
  *
  *  [버튼 페리페럴 추가 - 2026.05]
  *  0x02000010 : 버튼 입력 레지스터 (읽기 전용, btn[6:0])
+ *
+ *  [타이머 + IRQ 추가 - 2026.05]
+ *  0x02000014 : 타이머 카운터 (읽기 전용, 32비트)
+ *  0x02000018 : 타이머 비교값 (읽기/쓰기, 쓰면 IRQ 클리어 + 타이머 리셋)
+ *
+ *  IRQ 구조:
+ *  irq[0] = 타이머 인터럽트 (counter == compare 일 때 발생)
+ *  PROGADDR_IRQ = 0x00000010
  */
 
 `define PICORV32_REGS picosoc_regs
@@ -13,7 +21,7 @@ module attosoc (
 	input clk,
 	input reset_n,
 	output reg [7:0] led,
-	input [6:0] btn,        // ★ 추가: 버튼 입력 포트
+	input [6:0] btn,        // 버튼 입력 포트
 	output uart_tx,
 	input uart_rx
 );
@@ -32,6 +40,7 @@ module attosoc (
 	parameter integer MEM_WORDS = 8192;
 	parameter [31:0] STACKADDR = 32'h 0000_0000 + (4*MEM_WORDS);
 	parameter [31:0] PROGADDR_RESET = 32'h 0000_0000;
+	parameter [31:0] PROGADDR_IRQ   = 32'h 0000_0010;  // ★ IRQ 핸들러 주소
 
 	reg [31:0] ram [0:MEM_WORDS-1];
 	initial $readmemh("firmware.hex", ram);
@@ -78,14 +87,51 @@ module attosoc (
 	wire [31:0] simpleuart_reg_dat_do;
 	wire simpleuart_reg_dat_wait;
 
-	// ★ 추가: 버튼 레지스터 (0x02000010, 읽기 전용)
+	// 버튼 레지스터 (0x02000010, 읽기 전용)
 	wire        btn_reg_sel = mem_valid && (mem_addr == 32'h 0200_0010);
 	wire [31:0] btn_reg_do  = {25'b0, btn};   // btn[6:0]을 하위 7비트에
 
+	// ★ 타이머 레지스터 (0x02000014: counter, 0x02000018: compare)
+	reg [31:0] timer_cnt = 0;
+	reg [31:0] timer_cmp = 0;
+	reg        timer_irq = 0;
+
+	wire timer_cnt_sel = mem_valid && (mem_addr == 32'h 0200_0014);
+	wire timer_cmp_sel = mem_valid && (mem_addr == 32'h 0200_0018);
+
+	// ★ IRQ / EOI 신호
+	wire [31:0] irq;
+	wire [31:0] eoi;
+	assign irq = {31'b0, timer_irq};   // irq[0] = 타이머
+
+	// IO 레지스터 처리 (LED 쓰기 / 타이머 비교값 쓰기 / 타이머 카운터 동작)
 	always @(posedge clk) begin
 		iomem_ready <= 1'b0;
+
+		// 타이머 카운터 항상 증가
+		timer_cnt <= timer_cnt + 1;
+
+		// 카운터가 비교값에 도달하면 IRQ 발생 + 카운터 리셋
+		if (timer_cmp != 0 && timer_cnt == timer_cmp) begin
+			timer_irq <= 1'b1;
+			timer_cnt <= 32'b0;
+		end
+
+		// EOI로 IRQ 클리어 (CPU가 인터럽트 처리 완료 시 자동 신호)
+		if (eoi[0])
+			timer_irq <= 1'b0;
+
+		// LED 쓰기 (0x02000000)
 		if (iomem_valid && iomem_wstrb[0] && mem_addr == 32'h 02000000) begin
 			led <= iomem_wdata[7:0];
+			iomem_ready <= 1'b1;
+		end
+
+		// 타이머 비교값 쓰기 (0x02000018) — 쓰면 카운터/IRQ도 리셋
+		if (iomem_valid && iomem_wstrb[0] && mem_addr == 32'h 02000018) begin
+			timer_cmp <= iomem_wdata;
+			timer_cnt <= 32'b0;
+			timer_irq <= 1'b0;
 			iomem_ready <= 1'b1;
 		end
 	end
@@ -93,24 +139,28 @@ module attosoc (
 	assign mem_ready = (iomem_valid && iomem_ready) ||
 	                   simpleuart_reg_div_sel ||
 	                   (simpleuart_reg_dat_sel && !simpleuart_reg_dat_wait) ||
-	                   btn_reg_sel ||        // ★ 추가
+	                   btn_reg_sel       ||   // 버튼 읽기
+	                   timer_cnt_sel     ||   // ★ 타이머 카운터 읽기
+	                   timer_cmp_sel     ||   // ★ 타이머 비교값 읽기
 	                   ram_ready;
 
 	assign mem_rdata = simpleuart_reg_div_sel ? simpleuart_reg_div_do :
 	                   simpleuart_reg_dat_sel ? simpleuart_reg_dat_do :
-	                   btn_reg_sel           ? btn_reg_do :    // ★ 추가
+	                   btn_reg_sel            ? btn_reg_do             :
+	                   timer_cnt_sel          ? timer_cnt              :   // ★
+	                   timer_cmp_sel          ? timer_cmp              :   // ★
 	                   ram_rdata;
 
 	picorv32 #(
 		.STACKADDR(STACKADDR),
 		.PROGADDR_RESET(PROGADDR_RESET),
-		.PROGADDR_IRQ(32'h 0000_0000),
+		.PROGADDR_IRQ(PROGADDR_IRQ),      // ★ 0x00000010
 		.BARREL_SHIFTER(0),
 		.COMPRESSED_ISA(0),
 		.ENABLE_MUL(0),
 		.ENABLE_DIV(0),
-		.ENABLE_IRQ(0),
-		.ENABLE_IRQ_QREGS(0)
+		.ENABLE_IRQ(1),                   // ★ IRQ 활성화
+		.ENABLE_IRQ_QREGS(1)              // ★ IRQ 전용 레지스터 (자동 저장/복원)
 	) cpu (
 		.clk         (clk        ),
 		.resetn      (resetncpu  ),
@@ -120,7 +170,9 @@ module attosoc (
 		.mem_addr    (mem_addr   ),
 		.mem_wdata   (mem_wdata  ),
 		.mem_wstrb   (mem_wstrb  ),
-		.mem_rdata   (mem_rdata  )
+		.mem_rdata   (mem_rdata  ),
+		.irq         (irq        ),       // ★ IRQ 입력
+		.eoi         (eoi        )        // ★ EOI 출력 (인터럽트 처리 완료)
 	);
 
 	simpleuart simpleuart (

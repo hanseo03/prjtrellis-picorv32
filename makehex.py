@@ -1,27 +1,37 @@
 #!/usr/bin/env python3
-#
-# This is free and unencumbered software released into the public domain.
-#
-# Anyone is free to copy, modify, publish, use, compile, sell, or
-# distribute this software, either in source code form or as a compiled
-# binary, for any purpose, commercial or non-commercial, and by any
-# means.
+"""
+makehex.py  —  바이너리 파일을 Verilog $readmemh 형식 HEX로 변환
 
-from sys import argv
+사용법:
+  python3 makehex.py <input.bin> <words> > firmware.hex
 
-binfile = argv[1]
-nwords = int(argv[2])
+  <words> : 출력할 32비트 워드 수 (= MEM_WORDS, attosoc.v 의 8192)
+"""
 
-with open(binfile, "rb") as f:
-    bindata = f.read()
+import sys
 
-assert len(bindata) < 4*nwords
-assert len(bindata) % 4 == 0
+def main():
+    if len(sys.argv) < 3:
+        print(f"Usage: {sys.argv[0]} <binary_file> <num_words>", file=sys.stderr)
+        sys.exit(1)
 
-for i in range(nwords):
-    if i < len(bindata) // 4:
-        w = bindata[4*i : 4*i+4]
-        print("%02x%02x%02x%02x" % (w[3], w[2], w[1], w[0]))
-    else:
-        print("0")
+    bin_file  = sys.argv[1]
+    num_words = int(sys.argv[2])
 
+    with open(bin_file, "rb") as f:
+        data = f.read()
+
+    # 4바이트(32비트) 단위로 읽어서 출력
+    for i in range(num_words):
+        offset = i * 4
+        if offset + 4 <= len(data):
+            word = (data[offset]
+                  | data[offset+1] << 8
+                  | data[offset+2] << 16
+                  | data[offset+3] << 24)
+        else:
+            word = 0  # 바이너리보다 큰 영역은 0으로 채움
+        print(f"{word:08X}")
+
+if __name__ == "__main__":
+    main()
